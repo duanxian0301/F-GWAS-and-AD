@@ -1,0 +1,93 @@
+library(data.table)
+library(coloc)
+
+# ==========================================
+# 1. 路径与参数设置
+# ==========================================
+# ABF 不需要 PLINK 和 LD 矩阵，只需要 Summary Stats
+AD <- fread("D:/scPagwas/AD_GWAS_full.txt")
+lead_snps <- fread("lead_snps.txt") 
+
+window <- 250000 
+results <- list()
+
+# ==========================================
+# 2. 开始循环分析
+# ==========================================
+for(i in 1:nrow(lead_snps)){
+  
+  trait_tag <- lead_snps$trait[i]   
+  snp_id    <- lead_snps$snpid[i]
+  chr       <- lead_snps$chrnum[i]
+  pos       <- lead_snps$chrpos[i]
+  
+  message(paste0(">>> [", i, "/", nrow(lead_snps), "] 正在处理: ", trait_tag, " | ", snp_id))
+  
+  # 2.1 加载对应的 Factor GWAS
+  f_name <- gsub("-AD", "", trait_tag) 
+  f_file_path <- file.path("D:/mibiogen/F GWAS", paste0(f_name, ".txt"))
+  if(!file.exists(f_file_path)) next
+  F_current <- fread(f_file_path)
+  
+  # 2.2 提取 Locus 并严格对齐
+  # 注意：ABF 对 A1/A2 非常敏感，必须确保方向一致
+  F_locus <- F_current[CHR == chr & BP >= (pos - window) & BP <= (pos + window)]
+  AD_locus <- AD[CHR == chr & BP >= (pos - window) & BP <= (pos + window)]
+  
+  common_snps <- intersect(F_locus$SNP, AD_locus$SNP)
+  if(length(common_snps) < 50) next
+  
+  F_sub <- F_locus[SNP %in% common_snps][order(SNP)]
+  AD_sub <- AD_locus[SNP %in% common_snps][order(SNP)]
+  
+  # ==========================================
+  # 3. 构建 Dataset 并运行增强版 ABF
+  # ==========================================
+  
+  d1 <- list(
+    snp = F_sub$SNP, 
+    beta = F_sub$BETA, 
+    varbeta = F_sub$SE^2, 
+    N = median(F_sub$N), 
+    MAF = F_sub$MAF, 
+    type = "quant", 
+    sdY = 1
+  )
+  
+  d2 <- list(
+    snp = AD_sub$SNP, 
+    beta = AD_sub$BETA, 
+    varbeta = AD_sub$SE^2, 
+    N = median(AD_sub$N), 
+    MAF = AD_sub$FREQ, 
+    type = "cc", 
+    s = 0.35
+  )
+  
+  # 运行 coloc.abf
+  # p1: 性状1有信号概率 (默认1e-4)
+  # p2: 性状2有信号概率 (默认1e-4)
+  # p12: 共享信号概率。调高到 1e-04 代表我们认为重叠概率更高
+  my_p12 <- 1e-04 
+  
+  coloc_res <- coloc.abf(d1, d2, p1 = 1e-04, p2 = 1e-04, p12 = my_p12)
+  
+  # 3.1 保存结果
+  if(!is.null(coloc_res)){
+    sum_res <- coloc_res$summary
+    results[[snp_id]] <- data.frame(
+      trait = trait_tag,
+      lead_snp = snp_id,
+      nsnps = sum_res["nsnps"],
+      PP.H3 = round(sum_res["PP.H3.abf"], 3),
+      PP.H4 = round(sum_res["PP.H4.abf"], 3)
+    )
+    message("    PP.H3: ", results[[snp_id]]$PP.H3, " | PP.H4: ", results[[snp_id]]$PP.H4)
+  }
+}
+
+# ==========================================
+# 4. 汇总保存
+# ==========================================
+final_output <- rbindlist(results)
+fwrite(final_output, "coloc_ABF_enhanced_results.csv")
