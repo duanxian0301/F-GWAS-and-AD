@@ -1,0 +1,15 @@
+#MSSM for scpagwas
+#python
+import scanpy as sc
+import numpy as np
+
+adata = sc.read_h5ad("MSSM_AD_noPD_noLBD.h5ad")
+
+
+# 随机下采样 20k，用于scpagwas分析
+np.random.seed(123)
+idx = np.random.choice(adata.n_obs, 20000, replace=False)
+adata = adata[idx].copy()
+
+
+adata.write("MSSM_AD_20k.h5ad", compression="gzip")
