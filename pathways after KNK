@@ -1,0 +1,134 @@
+library(data.table)
+library(clusterProfiler)
+
+setwd("D:/文章/4NDD/单细胞/")
+
+df <- fread("sst_ZRANB3_diffRegulation.csv")
+
+# 构建 gene ranking 向量
+geneList <- df$Z
+names(geneList) <- df$gene
+
+# 去除 NA
+geneList <- geneList[!is.na(geneList)]
+
+# 排序（必须降序）
+geneList <- sort(geneList, decreasing = TRUE)
+
+cat("Total ranked genes:", length(geneList), "\n")
+
+
+load("D:/scPagwas/scPagwas-main/scPagwas-main/data/Genes_by_pathway_kegg.RData")
+
+term2gene <- data.frame()
+
+for (pw in names(Genes_by_pathway_kegg)) {
+  
+  genes <- Genes_by_pathway_kegg[[pw]]
+  
+  tmp <- data.frame(
+    pathway_id = pw,
+    gene = genes
+  )
+  
+  term2gene <- rbind(term2gene, tmp)
+}
+
+cat("Total pathways:", length(unique(term2gene$pathway_id)), "\n")
+
+gsea.res <- GSEA(
+  geneList = geneList,
+  TERM2GENE = term2gene,
+  pvalueCutoff = 0.05,
+  pAdjustMethod = "BH",
+  verbose = FALSE
+)
+
+gsea.df <- as.data.frame(gsea.res)
+
+cat("Significant pathways (FDR<0.05):",
+    sum(gsea.df$p.adjust < 0.05), "\n")
+
+head(gsea.df[, c("ID", "NES", "pvalue", "p.adjust")])
+
+
+library(KEGGREST)
+
+kegg.info <- keggList("pathway", "hsa")
+
+kegg.map <- data.frame(
+  ID = names(kegg.info),
+  pathway_name = sub(" - Homo sapiens \\(human\\)", "", kegg.info)
+)
+
+gsea.df <- merge(
+  gsea.df,
+  kegg.map,
+  by = "ID",
+  all.x = TRUE
+)
+
+
+fwrite(
+  gsea.df,
+  "L6_DCAF7_GSEA_KEGG_scPagwasDB.csv"
+)
+
+library(ggplot2)
+
+top.pos <- gsea.df[gsea.df$NES > 0, ]
+top.pos <- top.pos[order(top.pos$p.adjust), ][1:15, ]
+
+ggplot(
+  top.pos,
+  aes(
+    x = reorder(pathway_name, NES),
+    y = NES
+  )
+) +
+  geom_col(fill = "#E64B35") +
+  coord_flip() +
+  theme_classic(base_size = 14) +
+  labs(
+    x = "",
+    y = "Normalized Enrichment Score",
+    title = "GSEA – Positive enrichment (ZRANB3 KO)"
+  )
+
+top.neg <- gsea.df[gsea.df$NES < 0, ]
+top.neg <- top.neg[order(top.neg$p.adjust), ][1:15, ]
+
+ggplot(
+  top.neg,
+  aes(
+    x = reorder(pathway_name, NES),
+    y = NES
+  )
+) +
+  geom_col(fill = "#3C5488") +
+  coord_flip() +
+  theme_classic(base_size = 14) +
+  labs(
+    x = "",
+    y = "Normalized Enrichment Score",
+    title = "GSEA – Negative enrichment (ZRANB3 KO)"
+  )
+
+
+
+trs <- fread("D:/文章/Mibiogen and AD/图或补充图/单细胞和敲除部分新图/F1通路/Result_SST_Pathway_vs_TRS_FDRsig.csv")$pathway_id
+knk <- gsea.df$ID[gsea.df$p.adjust < 0.05]
+length(unique(names(Genes_by_pathway_kegg)))
+intersect(trs, knk)
+length(intersect(trs, knk)) /
+  length(union(trs, knk))
+phyper(
+  q = length(intersect(trs, knk)) - 1,
+  m = length(trs),
+  n = 345 - length(trs),
+  k = length(knk),
+  lower.tail = FALSE
+)
+
+
+
