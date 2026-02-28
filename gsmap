@@ -1,0 +1,4 @@
+gsmap quick_mode     --workdir "./example_quick_mode/F4"     --sample_name "F4"     --gsMap_resource_dir "gsMap_resource"     --hdf5_path "Visium_example_data/ST/AD_ST_fixed_coords_with_celltype.h5ad"     --annotation "celltype"     --data_layer "logcounts"     --sumstats_file "Visium_example_data/GWAS/F4.sumstats.gz"     --trait_name "F4"
+
+
+gsmap quick_mode     --workdir "./example_quick_mode/F4B"     --sample_name "F4B"     --gsMap_resource_dir "gsMap_resource"     --hdf5_path "Visium_example_data/ST/AD_ST_fixed_coords_with_celltype.h5ad"     --annotation "path_groups"     --data_layer "logcounts"     --sumstats_file "Visium_example_data/GWAS/F4.sumstats.gz"     --trait_name "F4B"
