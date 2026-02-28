@@ -1,0 +1,110 @@
+###########################################################
+# 1️⃣ 读取最终 SST 数据
+###########################################################
+
+library(Seurat)
+
+sce <- readRDS("MSSM_L6_final.rds")
+
+target_gene <- "DCAF7"
+
+cat("Total cells:", ncol(sce), "\n")
+cat("Total genes:", nrow(sce), "\n")
+
+###########################################################
+# 2️⃣ 选择 8000 HVG（更稳定）
+###########################################################
+
+sce <- FindVariableFeatures(
+  sce,
+  selection.method = "vst",
+  nfeatures = 6000
+)
+
+hvgs <- VariableFeatures(sce)
+
+###########################################################
+# 3️⃣ 构建 knk 矩阵（使用 counts）
+###########################################################
+
+countMat <- GetAssayData(sce, layer = "counts")
+dim(countMat)
+
+genes.use <- unique(c(target_gene, hvgs))
+genes.use <- intersect(genes.use, rownames(countMat))
+
+data.knk <- as.matrix(countMat[genes.use, ])
+
+cat("Gene number:", nrow(data.knk), "\n")
+cat("Cell number:", ncol(data.knk), "\n")
+
+###########################################################
+# 4️⃣ 控制细胞数量（建议 2000–3000）
+###########################################################
+
+set.seed(123)
+
+if(ncol(data.knk) > 3000){
+  cells.use <- sample(colnames(data.knk), 3000)
+  data.knk <- data.knk[, cells.use]
+}
+
+cat("Final gene number:", nrow(data.knk), "\n")
+cat("Final cell number:", ncol(data.knk), "\n")
+
+###########################################################
+# 5️⃣ 运行 scTenifoldKnk（升级参数）
+###########################################################
+
+library(scTenifoldKnk)
+library(scTenifoldNet)
+library(Matrix)
+
+set.seed(123)
+
+result <- scTenifoldKnk(
+  countMatrix = data.knk,
+  gKO = target_gene,
+  qc = FALSE,
+  nc_nNet = 10,      # 比原来更稳定
+  nc_nCells = 500    # 更适合当前规模
+)
+
+ ###########################################################
+# 6️⃣ 保存结果
+###########################################################
+
+saveRDS(result,
+        file = paste0("OPC_", target_gene, "_scTenifoldKnk.rds"))
+
+write.csv(
+  result$diffRegulation,
+  file = paste0("L6_", target_gene, "_diffRegulation.csv"),
+  row.names = FALSE
+)
+
+###########################################################
+# 7️⃣ Volcano Plot
+###########################################################
+
+library(ggplot2)
+
+df.diff <- result$diffRegulation
+
+df.diff$logFC <- log2(df.diff$FC + 1e-6)
+df.diff$negLogP <- -log10(df.diff$p.value + 1e-300)
+df.diff$significant <- with(df.diff, p.adj < 0.05 & abs(Z) > 2)
+
+ggplot(df.diff, aes(x = logFC, y = negLogP)) +
+  geom_point(aes(color = significant), alpha = 0.7, size = 1.5) +
+  scale_color_manual(values = c("grey70", "#d62728")) +
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  geom_hline(yintercept = -log10(0.05), linetype = "dotted") +
+  theme_classic(base_size = 14) +
+  labs(
+    title = paste0("Differential Regulation after ", target_gene, " KO"),
+    x = "log2(Network Fold Change)",
+    y = "-log10(P-value)",
+    color = "Significant"
+  )
+
