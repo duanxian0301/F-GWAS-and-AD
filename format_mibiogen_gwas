@@ -1,0 +1,72 @@
+library(data.table)
+
+# 设置路径
+input_dir <- "D:/mibiogen"
+output_dir <- "D:/mibiogen/GWAS"
+dir.create(output_dir, showWarnings = FALSE)
+
+# 获取所有gz文件
+gz_files <- list.files(input_dir, pattern = "\\.gz$", full.names = TRUE)
+
+# 创建结果记录
+results <- data.table(
+  file = character(),
+  status = character(),
+  n_snps = integer(),
+  message = character()
+)
+
+# 处理每个文件
+for (gz_file in gz_files) {
+  file_name <- tools::file_path_sans_ext(basename(gz_file))
+  output_file <- file.path(output_dir, paste0(file_name, ".txt"))
+
+  cat("处理:", file_name, "...")
+
+  tryCatch({
+    # 读取
+    data <- fread(gz_file)
+
+    # 转换
+    data_standard <- data[, .(
+      SNP = rsID,
+      CHR = chr,
+      BP = bp,
+      A1 = eff.allele,
+      A2 = ref.allele,
+      BETA = beta,
+      SE = SE,
+      P = P.weightedSumZ,
+      N = N
+    )]
+
+    # 保存
+    fwrite(data_standard, output_file, sep = "\t", quote = FALSE)
+
+    # 记录结果
+    results <- rbind(results, data.table(
+      file = file_name,
+      status = "成功",
+      n_snps = nrow(data_standard),
+      message = NA_character_
+    ))
+
+    cat(" 完成 (", nrow(data_standard), "个SNP)\n")
+
+  }, error = function(e) {
+    results <- rbind(results, data.table(
+      file = file_name,
+      status = "失败",
+      n_snps = NA_integer_,
+      message = e$message
+    ))
+    cat(" 失败:", e$message, "\n")
+  })
+}
+
+ # 保存处理记录
+fwrite(results, file.path(output_dir, "processing_log.txt"), sep = "\t")
+
+cat("\n处理完成！成功:", sum(results$status == "成功"),
+    "失败:", sum(results$status == "失败"), "\n")
+head(data_standard)
