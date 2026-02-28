@@ -1,0 +1,85 @@
+# 进入 WSL
+conda activate scpagwas_env
+
+# 进入 R（建议不要自动恢复旧 workspace）
+R --vanilla
+
+
+
+## =========================
+## scPagwas pipeline (F1 + MSSM)
+## WSL/conda version
+## =========================
+
+options(repos = c(CRAN = "https://mirrors.tuna.tsinghua.edu.cn/CRAN/"))
+options(timeout = 600)
+
+library(scPagwas)
+library(data.table)
+
+## ---- 0) 路径区：只需要改这里 ----
+gwas_file   <- "/mnt/d/mibiogen/F GWAS/F4.txt"
+gwas_file   <- "/mnt/d/scPagwas/AD_GWAS_full.txt"
+sc_rds_file <- "/mnt/d/文章/4NDD/单细胞/MSSM_AD_20k.rds"
+out_dir     <- "/mnt/d/scPagwas/AD_MSSM_AD"   # 建议把输出放到 /mnt/d/scPagwas 下，避免散落
+
+## ---- 1) 读 GWAS 并整理列名 ----
+data <- fread(gwas_file)
+
+setnames(
+  data,
+  old = c("SNP", "CHR", "BP", "BETA", "SE", "FREQ"),
+  new = c("rsid","chrom", "pos", "beta", "se", "maf")
+)
+
+data <- as.data.frame(data)
+
+## 必要检查：scPagwas 需要的关键列是否存在
+need_cols <- c("rsid","chrom","pos","beta","se","maf","A1","A2","P","N")
+missing_cols <- setdiff(need_cols, colnames(data))
+if (length(missing_cols) > 0) {
+  stop(paste("GWAS missing columns:", paste(missing_cols, collapse = ", ")))
+}
+
+## 可选：确保类型正确
+data$chrom <- as.character(data$chrom)  # scPagwas 内部会处理 chr/chr1..，先转字符最稳
+data$pos   <- as.integer(data$pos)
+data$maf   <- as.numeric(data$maf)
+data$beta  <- as.numeric(data$beta)
+data$se    <- as.numeric(data$se)
+
+## ---- 2) scPagwas 主函数 ----
+## 注意：block_annotation_hg37 / chrom_ld / Genes_by_pathway_kegg 必须在你的环境里已加载
+## 如果它们是包内对象，一般 library(scPagwas) 后就能找到；
+## 如果你是自己加载的，请在这里 source/读入它们。
+
+
+Genes_by_pathway_kegg <- readRDS("/mnt/d/scPagwas/Genes_by_pathway_kegg.rds")
+block_annotation_hg37 <- readRDS("/mnt/d/scPagwas/block_annotation_hg37.rds")
+chrom_ld <- readRDS("/mnt/d/scPagwas/chrom_ld.rds")
+
+
+setwd("/mnt/d/scPagwas")
+
+out_dir <- "AD_MSSM_AD"
+dir.create(out_dir, showWarnings = FALSE)
+
+
+Pagwas_data <- scPagwas_main(
+  Pagwas = NULL,
+  gwas_data = data,
+  Single_data = sc_rds_file,
+  output.prefix = "AD_MSSM_AD",
+  output.dirs = out_dir,
+  block_annotation = block_annotation_hg37,
+  assay = "RNA",
+  Pathway_list = Genes_by_pathway_kegg,
+  n.cores = 1,
+  iters_singlecell = 100,
+  chrom_ld = chrom_ld,
+  singlecell = FALSE,
+  celltype = TRUE
+)
+
+saveRDS(Pagwas_data, file = file.path(out_dir, "Pagwas_data_AD_MSSM_F1.rds"))
+message("Done! Results saved in: ", out_dir)
