@@ -1,0 +1,124 @@
+library(GenomicSEM)
+library(data.table)
+
+setwd("D:/mibiogen/LDSC_test")
+
+micro_dir <- "D:/mibiogen/GWAS_qc_freq/"
+ad_gwas   <- "D:/文章/CP4/ADGWAS/GWAS_qc_freq/AD.qc.freq.txt"
+ld_ref    <- "D:/LDSC/ldsc-master/eur_w_ld_chr/"
+hm3_snps  <- "D:/LDSC/ldsc-master/eur_w_ld_chr/w_hm3.snplist"
+
+out_dir <- "D:/mibiogen/LDSC_test/ldsc_results_csv"
+dir.create(out_dir, showWarnings = FALSE)
+
+# ---------- munge AD（一次即可） ----------
+munge(
+  files = ad_gwas,
+  hm3   = hm3_snps,
+  trait.names = "AD"
+)
+stopifnot(file.exists("AD.sumstats.gz"))
+
+# ---------- 列出所有菌群 ----------
+micro_files <- list.files(
+  micro_dir,
+  pattern = "\\.txt$",
+  full.names = TRUE
+)
+
+# ---------- for 循环：每个菌群 → 一个 CSV ----------
+for (gwas in micro_files) {
+  
+  trait_name <- gsub("\\.txt$", "", basename(gwas))
+  message("▶ Running LDSC for: ", trait_name)
+  
+  try({
+    
+    rm(list = ls(pattern = "\\.sumstats.gz$"))
+    gc()
+    
+    munge(
+      files = gwas,
+      hm3   = hm3_snps,
+      trait.names = trait_name
+    )
+    
+    micro_ss <- paste0(trait_name, ".sumstats.gz")
+    if (!file.exists(micro_ss)) stop("munge failed")
+    
+    ldsc_out <- ldsc(
+      traits = c(micro_ss, "AD.sumstats.gz"),
+      ld  = ld_ref,
+      wld = ld_ref,
+      trait.names = c(trait_name, "AD"),
+      sample.prev = c(NA, NA),
+      population.prev = c(NA, NA)
+    )
+    
+    S <- ldsc_out$S
+    V <- ldsc_out$V
+    
+    ## ---- h2 (microbiome) ----
+    h2_micro    <- S[1,1]
+    h2_micro_se <- sqrt(V[1,1])
+    h2_micro_z  <- h2_micro / h2_micro_se
+    h2_micro_p  <- 2 * pnorm(-abs(h2_micro_z))
+    
+    ## ---- h2 (AD) ----
+    h2_AD    <- S[2,2]
+    h2_AD_se <- sqrt(V[2,2])
+    h2_AD_z  <- h2_AD / h2_AD_se
+    h2_AD_p  <- 2 * pnorm(-abs(h2_AD_z))
+    
+    ## ---- genetic covariance ----
+    g_cov    <- S[1,2]
+    g_cov_se <- sqrt(V[1,2])
+    g_cov_z  <- g_cov / g_cov_se
+    g_cov_p  <- 2 * pnorm(-abs(g_cov_z))
+    
+    ## ---- genetic correlation ----
+    rg <- g_cov / sqrt(h2_micro * h2_AD)
+    
+    rg_se <- sqrt(
+      (V[1,2] / (h2_micro * h2_AD)) +
+        (g_cov^2 * V[1,1] / (4 * h2_micro^3 * h2_AD)) +
+        (g_cov^2 * V[2,2] / (4 * h2_micro * h2_AD^3))
+    )
+    
+    rg_z <- rg / rg_se
+    rg_p <- 2 * pnorm(-abs(rg_z))
+    
+    ## ---- 输出表 ----
+    out_tab <- data.table(
+      trait = trait_name,
+      
+      h2_micro     = h2_micro,
+      h2_micro_se  = h2_micro_se,
+      h2_micro_z   = h2_micro_z,
+      h2_micro_p   = h2_micro_p,
+      
+      h2_AD        = h2_AD,
+      h2_AD_se     = h2_AD_se,
+      h2_AD_z      = h2_AD_z,
+      h2_AD_p      = h2_AD_p,
+      
+      g_cov        = g_cov,
+      g_cov_se     = g_cov_se,
+      g_cov_z      = g_cov_z,
+      g_cov_p      = g_cov_p,
+      
+      rg           = rg,
+      rg_se        = rg_se,
+      rg_z         = rg_z,
+      rg_p         = rg_p
+    )
+    
+    fwrite(
+      out_tab,
+      file = file.path(out_dir, paste0(trait_name, "_LDSC.csv"))
+    )
+    
+    message("✔ Saved CSV for: ", trait_name)
+    
+  }, silent = TRUE)
+}
