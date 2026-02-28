@@ -1,0 +1,131 @@
+library(data.table)
+library(dplyr)
+
+############################
+## 1. 路径设置
+############################
+
+gwas_dir  <- "D:/文章/CP4/ADGWAS"
+out_dir   <- "D:/文章/CP4/ADGWAS/GWAS_qc_freq"
+freq_file <- "D:/SMR/g1000/g1000_eur.frq"
+
+# 创建输出文件夹
+if (!dir.exists(out_dir)) {
+  dir.create(out_dir, recursive = TRUE)
+}
+
+############################
+## 2. 读取 1000G EUR 频率
+############################
+
+freq <- fread(freq_file)
+
+freq <- freq %>%
+  rename(
+    FREQ_A1 = MAF,
+    A1_freq = A1,
+    A2_freq = A2
+  ) %>%
+  select(SNP, A1_freq, A2_freq, FREQ_A1)
+
+############################
+## 3. 获取所有 GWAS 文件
+############################
+
+gwas_files <- list.files(
+  path = gwas_dir,
+  pattern = "\\.txt$",
+  full.names = TRUE
+)
+
+############################
+## 4. for 循环处理每个 GWAS
+############################
+
+for (file in gwas_files) {
+
+  message("Processing: ", basename(file))
+
+  ## 4.1 读入 GWAS
+  gwas <- fread(file)
+
+  ## 4.2 合并频率
+  dat <- merge(
+    gwas,
+    freq,
+    by = "SNP",
+    all.x = TRUE
+  )
+
+  ## 4.3 等位基因对齐 → 得到 FREQ (= EAF)
+  dat <- dat %>%
+    mutate(
+      FREQ = case_when(
+        A1 == A1_freq & A2 == A2_freq ~ FREQ_A1,
+        A1 == A2_freq & A2 == A1_freq ~ 1 - FREQ_A1,
+        TRUE ~ NA_real_
+      )
+    )
+
+  ############################
+  ## 4.4 质控（QC）
+  ############################
+
+  valid_alleles <- c("A", "T", "C", "G")
+
+  dat_qc <- dat %>%
+    # ATCG
+    filter(A1 %in% valid_alleles,
+           A2 %in% valid_alleles) %>%
+    # 去除 A1 == A2
+    filter(A1 != A2) %>%
+    # 去除无法对齐频率
+    filter(!is.na(FREQ)) %>%
+    # MAF >= 1%
+    mutate(MAF = pmin(FREQ, 1 - FREQ)) %>%
+    filter(MAF >= 0.01) %>%
+    # 去 MHC
+    filter(!(CHR == 6 & BP >= 25e6 & BP <= 34e6)) %>%
+    # 去重复 SNP
+    distinct(SNP, .keep_all = TRUE)
+
+  ############################
+  ## 4.5 只保留指定列
+  ############################
+
+  dat_out <- dat_qc %>%
+    select(
+      SNP,
+      CHR,
+      BP,
+      A1,
+      A2,
+      FREQ,
+      BETA,
+      SE,
+      P,
+      N
+    )
+
+  ############################
+  ## 4.6 保存结果
+  ############################
+
+  out_file <- file.path(
+    out_dir,
+    paste0(tools::file_path_sans_ext(basename(file)),
+           ".qc.freq.txt")
+  )
+
+  fwrite(
+    dat_out,
+    file = out_file,
+    sep = "\t",
+    quote = FALSE,
+    na = "NA"
+  )
+
+  message("Saved: ", out_file)
+}
+
+message("All files processed successfully.")
