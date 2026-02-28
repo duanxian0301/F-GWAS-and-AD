@@ -1,0 +1,94 @@
+#1，提取细胞，python
+import scanpy as sc
+import numpy as np
+
+# 1️⃣ 用 backed 模式打开（不会读入内存）
+adata = sc.read_h5ad("MSSM_AD_noPD_noLBD.h5ad", backed="r")
+
+# 2️⃣ 找到 SST 索引
+idx = np.where(adata.obs["cell_type"].values == "L6 corticothalamic-projecting glutamatergic cortical neuron")[0]
+
+print("L6 cell number:", len(idx))
+
+# 3️⃣ 只 slice AnnData（不要直接操作 X）
+sst = adata[idx, :].to_memory()
+
+# 4️⃣ 保存
+sst.write("MSSM_L6_only.h5ad")
+
+#2，转为rds准备KNK，并处理symbol和基因数量
+library(anndata)
+library(Seurat)
+library(Matrix)
+
+ad <- read_h5ad("MSSM_SST_only.h5ad")
+
+# 看看维度
+dim(ad$X)
+counts <- Matrix::t(ad$X)
+dim(counts)
+
+
+metadata <- as.data.frame(ad$obs)
+
+seurat_sst <- CreateSeuratObject(
+  counts = counts,
+  meta.data = metadata
+)
+
+
+ncol(counts) == nrow(metadata)
+head(rownames(counts))
+
+
+# 至少在 5% 细胞表达
+keep_genes <- Matrix::rowSums(counts > 0) > (0.05 * ncol(counts))
+
+counts <- counts[keep_genes, ]
+
+
+dim(counts)
+
+library(org.Hs.eg.db)
+library(AnnotationDbi)
+
+genes_ens <- rownames(counts)
+
+gene_map <- AnnotationDbi::select(
+  org.Hs.eg.db,
+  keys = genes_ens,
+  keytype = "ENSEMBL",
+  columns = c("SYMBOL")
+)
+
+gene_map <- gene_map[!is.na(gene_map$SYMBOL), ]
+gene_map <- gene_map[!duplicated(gene_map$ENSEMBL), ]
+
+keep <- genes_ens %in% gene_map$ENSEMBL
+counts <- counts[keep, ]
+
+new_symbols <- gene_map$SYMBOL[
+  match(rownames(counts), gene_map$ENSEMBL)
+]
+
+rownames(counts) <- new_symbols
+
+head(rownames(counts))
+
+# 去除重复 gene symbol（保留表达量最大的）
+dup_genes <- duplicated(rownames(counts))
+
+cat("Duplicate genes removed:", sum(dup_genes), "\n")
+
+counts <- counts[!dup_genes, ]
+
+any(duplicated(rownames(counts)))
+# 用过滤后的 counts 重建 Seurat
+seurat_sst <- CreateSeuratObject(
+  counts = counts,
+  meta.data = metadata
+)
+
+Idents(seurat_sst) <- "cell_type"
+dim(seurat_sst)
+saveRDS(seurat_sst, file = "MSSM_SST_final.rds")
