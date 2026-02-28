@@ -1,0 +1,691 @@
+library(dplyr)
+library(GenomicSEM)
+library(Matrix)
+library(stats)
+library(corrplot)
+library(qgraph)
+library(tidyr)
+library(gdata)
+library(data.table)
+#0.单LDSC分析，纳入h2 z合格的GWAS
+
+#1.制作.sumstats文件
+setwd("D:/文章/Mibiogen and AD/多变量LDSC/14")
+#准备txt，SNP A1 A2 MAF BETA SE P N
+# 获取当前目录下所有 .txt 文件路径
+files <- list.files(path = "D:/文章/Mibiogen and AD/多变量LDSC/All_GWAS", pattern = "\\.txt$", full.names = TRUE)
+
+# 提取 trait 名称（去掉路径和扩展名）
+trait.names <- tools::file_path_sans_ext(basename(files))
+
+# 为每个 trait 生成一个 NA 对应的样本大小
+N <- rep(NA, length(files))
+
+# 指定 HapMap3 对齐参考文件
+hm3 <- "D:/LDSC/ldsc-master/eur_w_ld_chr/w_hm3.snplist"
+
+# 执行 munge 函数
+munge(files = files,
+      hm3 = hm3,
+      trait.names = trait.names,
+      N = N)
+
+#2.ldsc分析 
+
+setwd("D:/文章/Mibiogen and AD/多变量LDSC")
+
+gwas_dir <- "D:/文章/Mibiogen and AD/多变量LDSC/14"
+
+# 自动获取所有 .sumstats.gz 文件路径
+traits <- list.files(gwas_dir, pattern = "\\.sumstats\\.gz$", full.names = TRUE)
+
+# 根据文件数量生成 NA 向量
+n_traits <- length(traits)
+sample.prev <- rep(NA, n_traits)
+population.prev <- rep(NA, n_traits)
+
+# 提取文件前缀作为 trait.names（去掉路径和扩展名）
+trait.names <- str_replace(basename(traits), "\\.sumstats\\.gz$", "")
+
+# 设置 LD score 和 LD weight 目录
+ld <- "D:/LDSC/ldsc-master/eur_w_ld_chr/"
+wld <- "D:/LDSC/ldsc-master/eur_w_ld_chr/"
+
+
+#run LDSC
+LDSCoutput_all<-ldsc(traits=traits,sample.prev=sample.prev,population.prev=population.prev,ld=ld,wld=wld,trait.names=trait.names,
+                     ldsc.log="Mibiogen_LDSCoutput_ALLchr11phenos")
+
+#optional command to save the output as a .RData file for later usesave(LDSCoutput_all,file="Mibiogen_LDSCoutput_ALLchr14.RData")
+rg_mat <- cov2cor(LDSCoutput_all$S)
+write.csv(rg_mat,
+          file = "rg_matrix_11traits.csv")
+
+## MAKE DATA TABLE OF LDSC output
+# convert to correlation matrix
+cov_matrix<-as.matrix(LDSCoutput_all$S)
+rownames(cov_matrix) <- colnames(cov_matrix)
+
+# make cov table
+cov_dat <- data.frame(col = rep(colnames(cov_matrix), each = nrow(cov_matrix)), 
+                      row = rep(rownames(cov_matrix), ncol(cov_matrix)), 
+                      value = as.vector(cov_matrix))
+names(cov_dat) <- c("Trait 1", "Trait 2", "Genetic Covariance")
+head(cov_dat)
+
+# pull the SEs of the sampling covariance matrix
+k<-nrow(LDSCoutput_all$S)
+SE<-matrix(0, k, k)
+SE[lower.tri(SE,diag=TRUE)] <-sqrt(diag(LDSCoutput_all$V))
+rownames(SE) <- rownames(cov_matrix)
+colnames(SE) <- colnames(cov_matrix)
+
+SE_cov <- data.frame(col = rep(colnames(SE), each = nrow(SE)), 
+                     row = rep(rownames(SE), ncol(SE)), 
+                     value = as.vector(SE))
+names(SE_cov) <- c("Trait 1", "Trait 2", "Genetic Covariance SE")
+head(SE_cov)
+
+#obtain the p-values and create a matrix and a data table of these in same format as gen cov info
+p<-2*pnorm(abs(LDSCoutput_all$S/SE),lower.tail=FALSE)
+
+library(magrittr)
+#这里的ncol换成你trait的数量
+p_fdr <- matrix(p.adjust(as.vector(p), method='fdr'),ncol=11)
+
+rownames(p) <- rownames(cov_matrix)
+colnames(p) <- colnames(cov_matrix)
+upperTriangle(p) <- lowerTriangle(p, byrow=TRUE) # add pvalues to upper triangle of matrix
+
+rownames(p_fdr) <- rownames(cov_matrix)
+colnames(p_fdr) <- colnames(cov_matrix)
+upperTriangle(p_fdr) <- lowerTriangle(p_fdr, byrow=TRUE) # add pvalues to upper triangle of matrix
+
+
+p_dat <- data.frame(col = rep(colnames(p), each = nrow(p)), 
+                    row = rep(rownames(p), ncol(p)), 
+                    value = as.vector(p))
+names(p_dat) <- c("Trait 1", "Trait 2", "P value")
+head(p_dat)
+
+fdr <- data.frame(col = rep(colnames(p_fdr), each = nrow(p_fdr)), 
+                  row = rep(rownames(p_fdr), ncol(p_fdr)), 
+                  value = as.vector(p_fdr))
+names(fdr) <- c("Trait 1", "Trait 2", "P fdr")
+head(fdr)
+
+
+# Calculate & create correlation matrix using same code as function that prints the log file
+ratio <- tcrossprod(1 / sqrt(diag(LDSCoutput_all$S)))
+S_Stand <- LDSCoutput_all$S * ratio
+
+rownames(S_Stand) <- colnames(S_Stand)
+corr_dat <- data.frame(col = rep(colnames(S_Stand), each = nrow(S_Stand)), 
+                       row = rep(rownames(S_Stand), ncol(S_Stand)), 
+                       value = as.vector(S_Stand))
+names(corr_dat) <- c("Trait 1", "Trait 2", "Genetic Correlation")
+head(corr_dat)
+
+#calculate the ratio of the rescaled and original S matrices
+scaleO <- gdata::lowerTriangle(ratio, diag = TRUE)
+
+#rescale the sampling correlation matrix by the appropriate diagonals
+V_Stand <- LDSCoutput_all$V * tcrossprod(scaleO)
+
+#enter SEs from diagonal of standardized V to get genetic correlation SE's matching the log file
+r<-nrow(LDSCoutput_all$S)
+SE_Stand<-matrix(0, r, r)
+SE_Stand[lower.tri(SE_Stand,diag=TRUE)] <-sqrt(diag(V_Stand))
+
+colnames(SE_Stand) <- colnames(S_Stand)
+rownames(SE_Stand) <- rownames(S_Stand)
+
+corrSE_dat <- data.frame(col = rep(colnames(SE_Stand), each = nrow(SE_Stand)), 
+                         row = rep(rownames(SE_Stand), ncol(SE_Stand)), 
+                         value = as.vector(SE_Stand))
+names(corrSE_dat) <- c("Trait 1", "Trait 2", "Genetic Correlation SE")
+head(corrSE_dat)
+
+# make a table with all details
+all_dat <- cov_dat
+all_dat$`Genetic Covariance SE` <- SE_cov$`Genetic Covariance SE`
+all_dat$`Genetic Correlation` <- corr_dat$`Genetic Correlation`
+all_dat$`Genetic Correlation SE` <- corrSE_dat$`Genetic Correlation SE`
+all_dat$`P value` <- p_dat$`P value`
+all_dat$`FDR` <- fdr$`P fdr`
+head(all_dat)
+
+# remove all diagonal rows (i.e. trait with itself)
+all_dat <- subset(all_dat, all_dat$`Trait 1` != all_dat$`Trait 2`)
+# remove the replicated upper diagonal rows (so that each pairwise correlation is only included once in the table)
+all_dat <- subset(all_dat, all_dat$`Genetic Covariance SE`!=0 & all_dat$`Genetic Correlation SE` !=0)
+write.csv(all_dat, file = "Mibiogen_GeneticCorrelations_11Phenotypes.csv")
+
+
+# MAKE A CORRELATION PLOT OF PAIRWISE CORRELATIONS
+
+col <- colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA")) # choose colour pallete
+col <- colorRampPalette(c("#4477AA", "#77AADD", "#FFFFFF", "#EE9988", "#BB4444")) 
+# smooth correlation matrix for plotting
+Ssmooth<-as.matrix((nearPD(LDSCoutput_all$S, corr = FALSE))$mat)
+corr_matrix <- cov2cor(Ssmooth)
+range(corr_matrix) 
+
+### PDF corr matrix where the upper matrix has p values asterisks 
+# and the lower displays correlation coefficients
+pdf(file = "Mibiogen_corrplot11.pdf", height = 10, width = 11)
+corrplot(corr_matrix, method = "color", col = col(200), 
+         addCoef.col = "black", number.cex = .4, number.digits = 1, # Add coefficient of correlation
+         type = "lower",  order = "hclust",
+         tl.pos = "lt", tl.col = "black", tl.srt = 90, tl.cex = .7, # Text label color and rotation
+         cl.pos = "b", cl.cex = .7, cl.ratio = 0.1, 
+         # Combine with significance
+         diag = TRUE)
+corrplot(corr_matrix, add = TRUE, type = "upper", method = "circle", col = col(200),
+         diag = FALSE, tl.pos = "n", cl.pos = "n", order="hclust",
+         p.mat = p, sig.level = 0.05, insig = "label_sig", 
+         pch.col = "black", pch.cex = 1)
+dev.off()
+
+#check ratio difference before and after smoothing
+S_LD<-as.matrix((nearPD(LDSCoutput_all$S, corr = FALSE))$mat)
+
+#look at ratio and  difference of before and after smoothing
+S_LD/LDSCoutput_all$S
+S_LD-LDSCoutput_all$S # looks ok only very minimal smoothing was required
+
+
+#根据多变量LDSC的rg筛选，删除rg<0.1 and rg>0.9，筛完重跑以上步骤多变量LDSC，将最终确认的整理好的GWAS单独存放，进入下一步
+library(dplyr)
+library(GenomicSEM)
+library(Matrix)
+library(stats)
+library(tidyr)
+library(gdata)
+library(data.table)
+library(plyr)
+library(e1071)
+library(readr)
+library(lavaan)
+library(stringr)
+library(splitstackshape)
+library(R.utils)
+
+
+#3.开始EFA
+#用最终纳入的GWAS开始
+gwas_dir <- "D:/文章/Mibiogen and AD/多变量LDSC/14"
+
+# 自动获取所有 .sumstats.gz 文件路径
+traits <- list.files(gwas_dir, pattern = "\\.sumstats\\.gz$", full.names = TRUE)
+
+# 根据文件数量生成 NA 向量
+n_traits <- length(traits)
+sample.prev <- rep(NA, n_traits)
+population.prev <- rep(NA, n_traits)
+
+# 提取文件前缀作为 trait.names（去掉路径和扩展名）
+trait.names <- str_replace(basename(traits), "\\.sumstats\\.gz$", "")
+
+# 设置 LD score 和 LD weight 目录
+ld <- "D:/LDSC/ldsc-master/eur_w_ld_chr/"
+wld <- "D:/LDSC/ldsc-master/eur_w_ld_chr/"
+
+
+
+#run LDSC - odd
+LDSCoutput_odd<-ldsc(traits=traits,sample.prev=sample.prev,population.prev=population.prev,ld=ld,wld=wld,trait.names=trait.names,
+                     ldsc.log="Mibiogen_LDSCoutput_ODDchrEFA",select = "ODD")
+
+#optional command to save the output as a .RData file for later use
+save(LDSCoutput_odd,file="Mibiogen_LDSCoutput_ODDchrEFA.RData")
+
+#save as separate object for smoothing
+S_LD<-as.matrix((nearPD(LDSCoutput_odd$S, corr = FALSE))$mat)
+
+#look at ratio and  difference of before and after smoothing
+S_LD/LDSCoutput_odd$S
+S_LD-LDSCoutput_odd$S
+
+##############################################
+######code to calculate number of factors needed
+##############################################
+
+eig <- eigen(cov2cor(S_LD), only.values = TRUE)
+eig <- eig$values; nk <- length(eig); k <- 1:nk
+criteria <- mean(eig)
+# Compute the proportion of total variance explained by the eigenvalues.
+for (r in eig) {
+  cat(round(r / sum(eig), digits = 3), "")
+}
+# Compute the Kaiser rule.
+nkaiser <- sum(eig >= rep(criteria, nk))
+# Compute the acceleration factor.
+aparallel <- rep(criteria, length(eig))
+pred.eig <- af <- rep(NA, nk)
+for (j in 2:(nk - 1)) {
+  if (eig[j - 1] >= aparallel[j - 1]) {
+    af[j] <- (eig[j + 1] - 2 * eig[j]) + eig[j - 1]
+  }
+}
+naf <- which(af == max(af, na.rm = TRUE), TRUE) - 1
+# Compute the optimal coordinates.
+proportion <- eig/sum(eig)
+cumulative <- proportion
+for (i in 2:nk) cumulative[i] = cumulative[i - 1] + proportion[i]
+proportion[proportion < 0] <- 0
+cond1 <- TRUE
+cond2 <- TRUE
+i <- 0
+pred.eig <- af <- rep(NA, nk)
+while ((cond1 == TRUE) && (cond2 == TRUE) && (i < nk)) {
+  i <- i + 1
+  ind <- k[c(i + 1, nk)]
+  vp.p <- lm(eig[c(i + 1, nk)] ~ ind)
+  vp.prec <- pred.eig[i] <- sum(c(1, i) * coef(vp.p))
+  cond1 <- (eig[i] >= vp.prec)
+  cond2 <- (eig[i] >= aparallel[i])
+  noc <- i - 1
+}
+
+# Print results.
+cat("Number of factors to retain according to the Kaiser rule:", nkaiser, "\n",
+    "Number of factors to retain according to the acceleration factor:", naf, "\n",
+    "Number of factors to retain according to the optimal coordinates:", noc, "\n")
+
+
+#function to automatically write model based on EFA results
+#the arguments to the function are: 
+##Loadings: the matrix of EFA lodaings
+#S_LD: the LDSC genetic covariance matrix
+#cutoff: the EFA loadings cutoff
+#fix_resid: whether to apply constraint on all variables to keep residual variances above 0
+#bifactor: whether to specify a bifactor model
+#mustload: whether all variables should load on at least one factor, even if they don't meet EFA cutoff
+#common: whether to specify a common factor model 
+
+
+write.model<-function(Loadings,S_LD,cutoff,fix_resid=TRUE,bifactor=FALSE,mustload=FALSE,common=FALSE){
+  Model<-""
+  if(common == TRUE){
+    for(f in 1){
+      u<-1
+      Model1<-""
+      for(i in 1:nrow(S_LD)){
+        if(u == 1){
+          linestart<-paste("F", f, "=~",  colnames(S_LD)[i], sep = "")
+          u<-u+1
+          linemid<-""
+        }else{
+          linemid<-paste(linemid, " + ", colnames(S_LD)[i], sep = "")
+        }
+      }
+    }
+    Model<-paste(Model,linestart, linemid, " \n ", sep="")
+  }else{
+    if(mustload == TRUE){
+      Mins<-apply(abs(Loadings),1,max)
+      for(i in 1:nrow(Loadings)){
+        for(f in 1:ncol(Loadings)){
+          if(Mins[i] == Loadings[i,f]){
+            Loadings[i,f]<-cutoff+.01
+          }
+        }
+      }
+    }
+    
+    
+    for(f in 1:ncol(Loadings)){
+      u<-1
+      Model1<-""
+      for(i in 1:nrow(Loadings)){
+        if(abs(Loadings[i,f]) > cutoff){
+          if(u == 1){
+            linestart<-paste("F", f, "=~",  colnames(S_LD)[i], sep = "")
+            u<-u+1
+            linemid<-""
+          }else{
+            linemid<-paste(linemid, " + ", colnames(S_LD)[i], sep = "")
+          }
+        }
+      }
+      Model<-paste(Model,linestart, linemid, " \n ", sep="")
+      linestart<-""
+      linemid<-""
+    }
+    
+    if(bifactor==TRUE){
+      Model_bi<-""
+      u<-1
+      for(i in 1:ncol(S_LD)){
+        b<-grepl(colnames(S_LD)[i], Model)
+        if(b == TRUE){
+          if(u == 1){
+            linestart_bi<-paste("Common_F", "=~",  colnames(S_LD)[i], sep = "")
+            u<-u+1
+            linemid_bi<-""
+          }else{
+            linemid_bi<-paste(linemid_bi, " + ", colnames(S_LD)[i], sep = "")
+          }
+        }
+      }
+      Model_bi<-paste(linestart_bi,linemid_bi," \n ", sep="")
+      r<-1
+      Factor_bi<-""
+      for(i in 1:ncol(Loadings)){
+        Factor_bi_start<-paste("Common_F~~0*", "F", i, " \n ", sep = "")
+        Factor_bi<-paste(Factor_bi,Factor_bi_start,sep="")
+      }
+      
+      Modelsat<-""
+      for (i in 1:(ncol(Loadings)-1)) {
+        linestartc <- paste("", "F", i, "~~0*F", i+1, sep = "")
+        if (ncol(Loadings)-i >= 2) {
+          linemidc <- ""
+          for (j in (i+2):ncol(Loadings)) {
+            linemidc <- paste("", linemidc, "F", i, "~~0*F", j, " \n ", sep="")
+            
+          }
+        } else {linemidc <- ""}
+        Modelsat <- paste(Modelsat, linestartc, " \n ", linemidc, sep = "")
+      } 
+      
+      Model<-paste(Model,Model_bi,Factor_bi,Modelsat)
+    }
+    
+    
+  }
+  
+  if(fix_resid==TRUE){
+    Model3<-""
+    #create unique combination of letters for residual variance parameter labels
+    n<-combn(letters,4)[,sample(1:14000, ncol(S_LD), replace=FALSE)]
+    for(i in 1:ncol(S_LD)){
+      if(grepl(colnames(S_LD)[i],Model) == TRUE){
+        linestart3a <- paste(colnames(S_LD)[i], " ~~ ",  paste(n[,i],collapse=""), "*", colnames(S_LD)[i], sep = "")
+        linestart3b <- paste(paste(n[,i],collapse=""), " > .0001", sep = "")
+        Model3<-paste(Model3, linestart3a, " \n ", linestart3b, " \n ", sep = "")
+      }
+    }
+    Model<-paste(Model,Model3,sep="")
+  }
+  
+  
+  return(Model)
+}
+
+
+##7-factor model - Kaiser
+
+
+EFA_5<-factanal(factors = 4, covmat = S_LD, n.obs = 2, rotation = "promax")
+print(EFA_5, sort=TRUE)
+print(EFA_5,digits=5,cutoff=.30,sort=TRUE)
+Loadings_5<-(EFA_5$loadings[1:ncol(S_LD),1:4])
+Model_5<-write.model(Loadings_5,S_LD,.30,mustload=TRUE)
+cat(Model_5)
+
+#8-根据分组情况整理列表，这将作为后续F由哪些性状构成，使用这些F进行CFA构建
+
+
+######## 4.CFA
+
+#run LDSC - even
+LDSCoutput_even<-ldsc(traits=traits,sample.prev=sample.prev,population.prev=population.prev,ld=ld,wld=wld,trait.names=trait.names,,stand=TRUE,
+                      ldsc.log="Mibiogen_LDSCoutput_EVEN_CFA",select = "EVEN")
+
+#optional command to save the output as a .RData file for later use
+save(LDSCoutput_even,file="Mibiogen_LDSCoutput_EVEN_CFA.RData")
+
+# run 7-factor CFA models
+# .30 loadings
+CFAeven_5 <- usermodel(LDSCoutput_even, estimation = "DWLS", model = Model_5, 
+                       CFIcalc = TRUE, std.lv = TRUE, imp_cov = FALSE)
+CFAeven_5
+
+CFAeven_5$results
+
+
+
+write.table(as.data.frame(CFAeven_5$results), "CFA.csv", col.names=T, row.names=F, quote=F, sep=",")
+
+write.table(as.data.frame(CFAeven_G$results), "CFA_G.csv", col.names=T, row.names=F, quote=F, sep=",")
+
+####### GENOME-WIDE STUFF
+#run LDSC - all autosomes
+LDSCoutput<-ldsc(traits=traits,sample.prev=sample.prev,population.prev=population.prev,ld=ld,wld=wld,trait.names=trait.names,
+                 ldsc.log="Mibiogen_LDSCoutput_ALL")
+
+
+#optional command to save the output as a .RData file for later use
+save(LDSCoutput,file="Mibiogen_LDSCoutput_ALL.RData")
+
+# Genome-wide common factor model
+CommonFactor<- commonfactor(covstruc = LDSCoutput, estimation="DWLS")
+
+CommonFactor
+
+# genome wide CFA - 7 factor model
+
+# .30 loadings
+
+# genome wide CFA - 6 factor model
+CFAall_G <- usermodel(LDSCoutput, estimation = "DWLS", model = Model_5,std.lv = TRUE, imp_cov = FALSE)
+
+CFAall_G
+
+write.table(as.data.frame(CFAall_G$results), "CFA_G.csv", col.names=T, row.names=F, quote=F, sep=",")
+
+
+
+# bifactor model with all 6 factors - are the loadings for F1 near 0?
+bifactor_model <- "
+CM =~ NA*CRP + DBP + FG+HbA1c+HDL+LDL+SBP+TG+TC
+F1 =~ NA*LDL + TC
+F2 =~ NA*CRP + HDL + TG
+F3 =~ NA*DBP + SBP
+F4 =~ NA*FG + HbA1c 
+CM~~0*F1 
+CM~~0*F2
+CM~~0*F3
+CM~~0*F4
+F1 ~~ F2
+F1 ~~ F3
+F1 ~~ F4
+F2 ~~ F3
+F2 ~~ F4
+F3 ~~ F4
+FG ~~ ekqv*FG 
+ ekqv > .0001 
+SBP ~~ acil*SBP 
+ acil > .0001
+ TC ~~ cmpv*TC 
+ cmpv > .0001 
+"
+
+
+bifactor <- usermodel(LDSCoutput, estimation = "DWLS", model = bifactor_model, 
+                      CFIcalc = TRUE, std.lv = TRUE, imp_cov = FALSE)
+bifactor
+
+bifactor$results
+write.table(as.data.frame(bifactor$results), "CFA_Full2.csv", col.names=T, row.names=F, quote=F, sep=",")
+
+#以上3个模型可使用自动分组，也可自主构建模型分组
+
+#4 生成gensem_sub_pair文件，用于构建F GWAS
+# 自动识别 GWAS/ 下所有 txt，注意使用txt，SNP A1 A2 MAF BETA SE P N
+gwas_dir <- "14"
+files <- list.files(path = gwas_dir, pattern = "\\.txt$", full.names = TRUE)
+
+# 可选：固定排序（避免不同系统顺序不一致）
+files <- sort(files)
+
+# 自动生成 trait 名称：用文件名去掉扩展名
+trait.names <- tools::file_path_sans_ext(basename(files))
+
+ref <- "reference.1000G.maf.0.005.txt"
+
+# 文件数量
+k <- length(files)
+stopifnot(k > 0)
+
+# 按文件数量自动生成参数向量
+se.logit <- rep(FALSE, k)
+OLS      <- rep(FALSE,  k)
+linprob  <- rep(FALSE, k)
+N        <- rep(NA,    k)
+
+# 跑 sumstats
+neuroticism_sumstats <- sumstats(
+  files = files,
+  ref = ref,
+  trait.names = trait.names,
+  se.logit = se.logit,
+  OLS = OLS,
+  linprob = linprob,
+  N = N,,betas=NULL, info.filter=.6, maf.filter=0.01,keep.indel=FALSE,parallel=TRUE,cores=48
+)
+
+SUD_sumstats=neuroticism_sumstats
+
+# ===== Save datasets with subsets of SNPs
+# Split in subsets of SNPs
+baseModel="cancigalc"
+
+n_chunks=50000
+n_rows <- nrow(SUD_sumstats)
+r  <- rep(1:ceiling(n_rows/n_chunks),each=n_chunks)[1:n_rows]
+SUD_sumstats_list <- split(SUD_sumstats,r)
+n_splits=seq(1:length(SUD_sumstats_list)) # Number of subsets:75
+names(SUD_sumstats_list)=paste0("GenSem_sub_par", n_splits, "_", baseModel)
+
+# Save output on cluster
+sapply(names(SUD_sumstats_list), function(x) 
+  fwrite(SUD_sumstats_list[[x]], file=paste0("input/", x), 
+         col.names=T, row.names=F, quote=F, sep="\t") )
+
+#5 使用合格模型的分组信息进行GWAS 构建
+library(GenomicSEM)
+library(data.table)
+
+# ---------- load LDSC ----------
+#load("CM_EUR_LDSCoutput_ALL.RData")
+
+# ---------- model ----------
+model <- "
+F1 =~ Bifidobacteriumid436 + ChristensenellaceaeRid11283 + ErysipelotrichaceaeUCG003id11384 + LachnospiraceaeFCS020groupid11314 + Ruminiclostridium9id11357 + RuminococcaceaeUCG005id11363
+F2 =~ Bifidobacteriumid436 + ChristensenellaceaeRid11283 + Clostridiumsensustricto1id1873 + ErysipelotrichaceaeUCG003id11384 + LachnospiraceaeFCS020groupid11314 + LachnospiraceaeUCG004id11324
+F3 =~ Anaerostipesid1991 + Blautiaid1992 + Clostridiumsensustricto1id1873 + RuminococcaceaeUCG005id11363
+F4 =~ Akkermansiaid4037 + Anaerostipesid1991 + ErysipelotrichaceaeUCG003id11384
+
+# 子因子之间允许相关
+F1 ~~ F2
+F1 ~~ F3
+F1 ~~ F4
+F2 ~~ F3
+F2 ~~ F4
+F3 ~~ F4
+
+# SNP 回归
+F1 ~ SNP
+F2 ~ SNP
+F3 ~ SNP
+F4 ~ SNP
+
+# 每个指标残差最小约束
+Bifidobacteriumid436 ~~ e1*Bifidobacteriumid436
+e1 > .0001
+ChristensenellaceaeRid11283 ~~ e2*ChristensenellaceaeRid11283
+e2 > .0001
+ErysipelotrichaceaeUCG003id11384 ~~ e3*ErysipelotrichaceaeUCG003id11384
+e3 > .0001
+LachnospiraceaeFCS020groupid11314 ~~ e4*LachnospiraceaeFCS020groupid11314
+e4 > .0001
+Ruminiclostridium9id11357 ~~ e5*Ruminiclostridium9id11357
+e5 > .0001
+RuminococcaceaeUCG005id11363 ~~ e6*RuminococcaceaeUCG005id11363
+e6 > .0001
+Clostridiumsensustricto1id1873 ~~ e7*Clostridiumsensustricto1id1873
+e7 > .0001
+LachnospiraceaeUCG004id11324 ~~ e8*LachnospiraceaeUCG004id11324
+e8 > .0001
+Anaerostipesid1991 ~~ e9*Anaerostipesid1991
+e9 > .0001
+Blautiaid1992 ~~ e10*Blautiaid1992
+e10 > .0001
+Akkermansiaid4037 ~~ e11*Akkermansiaid4037
+e11 > .0001
+"
+
+
+# ---------- output ----------
+dirs <- c("output/F1", "output/F2", "output/F3", "output/F4")
+sapply(dirs, function(x) if (!dir.exists(x)) dir.create(x, recursive = TRUE))
+
+# ---------- Start looping ----------
+for (i in 1:59) {
+  cat("\n==============================\n")
+  cat("▶ Running partition:", i, "of 59\n")
+  cat("==============================\n")
+  
+  input_file <- paste0("input/GenSem_sub_par", i, "_cancigalc")
+  
+  # cheak sumstats
+  if (!file.exists(input_file)) {
+    cat("⚠️ File not found:", input_file, "\n")
+    next
+  }
+  
+  # read sumstats
+  sumstats <- tryCatch({
+    fread(input_file)
+  }, error = function(e) {
+    cat("❌ Error reading file:", input_file, "\n")
+    print(e)
+    return(NULL)
+  })
+  
+  if (is.null(sumstats)) next
+  
+  # ---------- Run userGWAS ----------
+  result <- tryCatch({
+    userGWAS(
+      covstruc = LDSCoutput,
+      SNPs = sumstats,
+      estimation = "DWLS",
+      model = model,
+      printwarn = TRUE,
+      sub = c("F1~SNP", "F2~SNP", "F3~SNP", "F4~SNP"),
+      cores = 8,
+      toler = 1e-50,
+      parallel = TRUE,
+      GC = "none",
+      MPI = FALSE,
+      smooth_check = TRUE,
+      fix_measurement = TRUE,
+      Q_SNP = TRUE
+    )
+  }, error = function(e) {
+    cat("❌ Model failed for partition", i, "\n")
+    print(e)
+    return(NULL)
+  })
+  
+  if (is.null(result)) next
+  
+  # ---------- Save result ----------
+  tryCatch({
+    fwrite(as.data.frame(result[[1]]), paste0("output/F1/F1-", i, ".txt"), sep = "\t")
+    fwrite(as.data.frame(result[[2]]), paste0("output/F2/F2-", i, ".txt"), sep = "\t")
+    fwrite(as.data.frame(result[[3]]), paste0("output/F3/F3-", i, ".txt"), sep = "\t")
+    fwrite(as.data.frame(result[[4]]), paste0("output/F4/F4-", i, ".txt"), sep = "\t")
+  }, error = function(e) {
+    cat("⚠️ Failed to write output for partition", i, "\n")
+    print(e)
+  })
+  
+  cat("✅ Partition", i, "completed.\n")
+}
+
+
