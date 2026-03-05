@@ -83,3 +83,142 @@ Pagwas_data <- scPagwas_main(
 
 saveRDS(Pagwas_data, file = file.path(out_dir, "Pagwas_data_AD_MSSM_F1.rds"))
 message("Done! Results saved in: ", out_dir)
+
+
+#PATHWAY
+library(Seurat)
+library(data.table)
+library(KEGGREST)
+
+setwd("D:/文章/4NDD/单细胞")
+
+# =========================================================
+# 1️⃣ 读取 Seurat 对象
+# =========================================================
+sce <- readRDS("D:/文章/4NDD/单细胞/MSSM_AD_20k.rds")
+Idents(sce) <- "cell_type"
+
+# 目标细胞类型
+celltype.use <- "sst GABAergic cortical interneuron"
+cells.use <- WhichCells(sce, idents = celltype.use)
+
+cat("Number of pvalb cells:", length(cells.use), "\n")
+
+# =========================================================
+# 2️⃣ 读取 scPagwas 结果 (TRS)
+# =========================================================
+cell.score <- fread("D:/scPagwas/AD_MSSM_F1/AD_MSSM_F1_singlecell_scPagwas_score_pvalue.Result.csv")
+setnames(cell.score, 1, "cell_id")
+
+# 把 TRS 映射回 Seurat
+sce$TRS <- cell.score$scPagwas.TRS.Score[
+  match(colnames(sce), cell.score$cell_id)
+]
+
+trs.vec <- sce$TRS[match(cells.use, colnames(sce))]
+
+# =========================================================
+# 3️⃣ 加载 KEGG 通路库（scPagwas 内置）
+# =========================================================
+load("D:/scPagwas/scPagwas-main/scPagwas-main/data/Genes_by_pathway_kegg.RData")
+
+# =========================================================
+# 4️⃣ 提取表达矩阵（log-normalized data）
+# =========================================================
+expr.mat <- GetAssayData(sce, layer = "data")[, cells.use]
+
+# =========================================================
+# 5️⃣ 计算每条通路的 pathway score
+#     用平均表达（比 AddModuleScore 更稳）
+# =========================================================
+pathway.results <- list()
+
+for (pw in names(Genes_by_pathway_kegg)) {
+  
+  genes.use <- intersect(Genes_by_pathway_kegg[[pw]], rownames(expr.mat))
+  
+  if (length(genes.use) >= 10) {
+    
+    pathway.score <- colMeans(expr.mat[genes.use, , drop = FALSE])
+    
+    if (sd(pathway.score) > 0) {
+      
+      r <- cor(pathway.score, trs.vec, method = "pearson")
+      
+      p <- cor.test(pathway.score, trs.vec, method = "pearson")$p.value
+      
+      pathway.results[[pw]] <- data.table(
+        pathway_id = pw,
+        r = r,
+        p_value = p
+      )
+    }
+  }
+}
+
+pathway.results <- rbindlist(pathway.results)
+
+# =========================================================
+# 6️⃣ FDR 校正
+# =========================================================
+pathway.results[, FDR := p.adjust(p_value, method = "fdr")]
+
+# 只保留显著通路
+pathway.sig <- pathway.results[FDR < 0.05]
+
+cat("Significant pathways:", nrow(pathway.sig), "\n")
+
+# =========================================================
+# 7️⃣ 添加 KEGG 通路名称
+# =========================================================
+kegg.info <- keggList("pathway", "hsa")
+
+kegg.map <- data.table(
+  pathway_id = names(kegg.info),
+  pathway_name = sub(" - Homo sapiens \\(human\\)", "", kegg.info)
+)
+
+pathway.sig <- merge(pathway.sig, kegg.map, by = "pathway_id", all.x = TRUE)
+pathway.sig[, abs_r := abs(r)]
+setorder(pathway.sig, -abs_r)
+
+
+# =========================================================
+# 8️⃣ 保存 CSV
+# =========================================================
+dir.create("D:/scPagwas/AD_MSSM_F1/Pathway_TRS", showWarnings = FALSE)
+
+fwrite(
+  pathway.sig,
+  "D:/scPagwas/AD_MSSM_F1/Pathway_TRS/Result_sst_Pathway_vs_TRS_FDRsig.csv"
+)
+
+# =========================================================
+# 9️⃣ 可视化（论文级）
+# =========================================================
+library(ggplot2)
+
+top.plot <- pathway.sig[1:min(15, .N)]
+
+p <- ggplot(top.plot,
+            aes(x = reorder(pathway_name, r),
+                y = r,
+                fill = r > 0)) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_manual(values = c("#3C5488", "#E64B35"), guide = "none") +
+  theme_classic(base_size = 14) +
+  labs(
+    x = "",
+    y = "Pearson correlation (Pathway score vs TRS)",
+    title = paste0("TRS-associated pathways in ", celltype.use)
+  )
+
+print(p)
+
+ggsave(
+  "D:/scPagwas/AD_MSSM_F1/Pathway_TRS/Fig_sst_Pathway_vs_TRS.pdf",
+  p,
+  width = 15,
+  height = 6
+)
