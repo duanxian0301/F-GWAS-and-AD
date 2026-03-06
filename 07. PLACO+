@@ -1,111 +1,38 @@
-
-## Prepare SNP, effect_allele, other_allele, Z or b/se, and p
-
-# 1. Load the PLACO+ script
+# GWAS summary statistics should undergo standard quality control before PLACO+ analysis
 library(devtools)
 library(data.table)
 source("H:/PLACO+/PLACO-master/PLACO_v0.2.0.R")
 
-
-# 2. Read the real GWAS data
-# Assume there are two files: gwas1.txt and gwas2.txt
-# Each file should contain at least SNP, effect_allele, other_allele, Z or b/se, and p
-
+# Read input data
 gwas1 <- fread("AD.txt")
 gwas2 <- fread("F4.txt")
-head(gwas1)
 
-# 3. Calculate Z-scores and p-values if they are not already present in the files
-if(!"Z" %in% colnames(gwas1)) gwas1$Z <- gwas1$b / gwas1$se
-if(!"Z" %in% colnames(gwas2)) gwas2$Z <- gwas2$b / gwas2$se
+# Construct PLACO+ input matrices
+Z.matrix <- cbind(gwas1$Z, gwas2$Z)
+P.matrix <- cbind(gwas1$p, gwas2$p)
+colnames(Z.matrix) <- c("Z1", "Z2")
+colnames(P.matrix) <- c("P1", "P2")
 
-
-# 4. Automatic effect allele alignment (allele harmonization)
-common_snps <- intersect(gwas1$SNP, gwas2$SNP)
-g1 <- gwas1[match(common_snps, gwas1$SNP), ]
-g2 <- gwas2[match(common_snps, gwas2$SNP), ]
-
-flip <- rep(FALSE, length(common_snps))
-
-for(i in seq_along(common_snps)){
-  ea1 <- g1$effect_allele[i]; oa1 <- g1$other_allele[i]; eaf1 <- g1$eaf[i]
-  ea2 <- g2$effect_allele[i]; oa2 <- g2$other_allele[i]; eaf2 <- g2$eaf[i]
-  
-  # 1. First check whether the SNP is palindromic (A/T, C/G)
-  if((ea1 %in% c("A","T") & ea2 %in% c("A","T")) |
-     (ea1 %in% c("G","C") & ea2 %in% c("G","C"))){
-    
-    # Use EAF to determine whether flipping is required
-    if(!is.na(eaf1) & !is.na(eaf2)){
-      if(abs(eaf1 - eaf2) < 0.1){              # Similar allele frequencies -> no flip
-        flip[i] <- FALSE
-      } else if(abs(eaf1 - (1-eaf2)) < 0.1){   # Complementary frequencies -> flip
-        flip[i] <- TRUE
-      } else {                                 # Frequency difference too large -> exclude
-        flip[i] <- NA
-      }
-    } else {                                   # Missing EAF -> exclude
-      flip[i] <- NA
-    }
-    
-  } 
-  # 2. Non-palindromic SNPs
-  else if(ea1 == ea2 & oa1 == oa2){            # EA/OA completely match
-    flip[i] <- FALSE
-  } else if(ea1 == oa2 & oa1 == ea2){          # EA/OA are swapped
-    flip[i] <- TRUE
-  } else {                                     # Strand direction cannot be determined -> exclude
-    flip[i] <- NA
-  }
-}
-
-# Remove SNPs with unresolved alignment
-keep <- !is.na(flip)
-g1 <- g1[keep, ]
-g2 <- g2[keep, ]
-flip <- flip[keep]
-common_snps <- common_snps[keep]
-
-# Flip Z / beta
-g2$Z_aligned <- g2$Z
-g2$Z_aligned[flip] <- -g2$Z_aligned[flip]
-
-g2$beta_aligned <- g2$b
-g2$beta_aligned[flip] <- -g2$beta_aligned[flip]
-
-# Construct PLACO+ matrices
-Z.matrix <- cbind(g1$Z, g2$Z_aligned)
-P.matrix <- cbind(g1$p, g2$p)
-colnames(Z.matrix) <- c("Z1","Z2")
-colnames(P.matrix) <- c("P1","P2")
-
-# 5. Filter out extremely large Z-scores (squared value > 80)
+# Filter extreme statistics
 Z1_sq <- Z.matrix[,1]^2
 Z2_sq <- Z.matrix[,2]^2
 keep <- (Z1_sq <= 80) & (Z2_sq <= 80)
-Z.matrix <- Z.matrix[keep,]
-P.matrix <- P.matrix[keep,]
-common_snps <- common_snps[keep]
+Z.matrix <- Z.matrix[keep, ]
+P.matrix <- P.matrix[keep, ]
 
-# 6. Estimate variance and correlation parameters
+# Estimate parameters
 VarZ <- var.placo(Z.matrix, P.matrix, p.threshold = 1e-4)
-CorZ <- cor.pearson(Z.matrix, P.matrix, p.threshold = 1e-4, returnMatrix=FALSE)
+CorZ <- cor.pearson(Z.matrix, P.matrix, p.threshold = 1e-4, returnMatrix = FALSE)
 
-# 7. Perform the PLACO+ test for each SNP
+# Run PLACO+
 placo_out <- lapply(1:nrow(Z.matrix), function(i) {
-  placo.plus(Z=Z.matrix[i,], VarZ=VarZ, CorZ=CorZ)
+  placo.plus(Z = Z.matrix[i, ], VarZ = VarZ, CorZ = CorZ)
 })
 
-# 8. Summarize the results
+# Save results
 results <- data.frame(
-  SNP = common_snps,
   T_placo = sapply(placo_out, function(x) x$T.placo.plus),
   P_placo = sapply(placo_out, function(x) x$p.placo.plus)
 )
 
-# 9. Save the results
-write.table(results, "PLACO_plus_results.txt", sep="\t", row.names=FALSE, quote=FALSE)
-
-#========================================================
-# Analysis completed
-#========================================================
+write.table(results, "PLACO_plus_results.txt", sep = "\t", row.names = FALSE, quote = FALSE)
