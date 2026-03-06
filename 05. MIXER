@@ -1,1 +1,203 @@
+Step 1: Run univariate analysis.
+#!/bin/bash
 
+# ==========================================
+# run_mixer_serial.sh (CPU-aware parallel fit1)
+# Usage:
+# ./run_mixer_serial.sh <trait1_file> [<trait2_file> ... <traitN_file>]
+# ==========================================
+
+if [ $# -lt 1 ]; then
+    echo "Usage: $0 <trait1_file> [<trait2_file> ... <traitN_file>]"
+    exit 1
+fi
+
+# -----------------------
+# Parameter settings
+# -----------------------
+TOTAL_REPS=20
+CORES_PER_TASK=10
+TOTAL_CORES=60
+MAX_JOBS=$(( TOTAL_CORES / CORES_PER_TASK ))   # 60 / 6 = 10
+
+echo "Each replicate uses $CORES_PER_TASK CPU cores"
+echo "A maximum of $MAX_JOBS replicate jobs can run simultaneously"
+echo ""
+
+MIXER_SIF=/mnt/d/gsamixer/singularity/v2.2.1/mixer.sif
+REFERENCE_DIR=/mnt/d/gsamixer/reference
+
+# Common MiXeR arguments
+MIXER_COMMON_ARGS="--ld-file /REF/ldsc/1000G_EUR_Phase3_plink/1000G.EUR.QC.@.run4.ld \
+--bim-file /REF/ldsc/1000G_EUR_Phase3_plink/1000G.EUR.QC.@.bim \
+--threads $CORES_PER_TASK"
+
+# MiXeR Python command
+MIXER_PY="singularity exec \
+    --home $PWD:/home \
+    --bind $REFERENCE_DIR:/REF \
+    --bind $PWD:/data \
+    $MIXER_SIF python /tools/mixer/precimed/mixer.py"
+
+# -----------------------
+# Replicate function
+# -----------------------
+run_replicate() {
+    trait_file=$1
+    trait_name=$2
+    rep=$3
+    start_cpu=$4
+    end_cpu=$5
+
+    CPU_MASK="${start_cpu}-${end_cpu}"
+    EXTRACT="--extract /REF/ldsc/1000G_EUR_Phase3_plink/1000G.EUR.QC.prune_maf0p05_rand2M_r2p8.rep${rep}.snps"
+
+    echo "Running fit1: ${trait_name} rep${rep} on CPUs ${CPU_MASK}"
+
+    taskset -c ${CPU_MASK} \
+        $MIXER_PY fit1 $MIXER_COMMON_ARGS $EXTRACT \
+        --trait1-file /data/$(basename "$trait_file") \
+        --out ${trait_name}.fit.rep${rep}
+}
+
+# -----------------------
+# Main loop (CPU allocation + parallel execution)
+# -----------------------
+current_jobs=0
+cpu_pointer=0
+
+for TRAIT_FILE in "$@"; do
+    TRAIT_NAME=$(basename "$TRAIT_FILE" .csv.gz)
+    echo "Processing trait: $TRAIT_NAME"
+
+    for rep in $(seq 1 $TOTAL_REPS); do
+
+        start_cpu=$cpu_pointer
+        end_cpu=$(( cpu_pointer + CORES_PER_TASK - 1 ))
+        cpu_pointer=$(( (cpu_pointer + CORES_PER_TASK) % TOTAL_CORES ))
+
+        run_replicate "$TRAIT_FILE" "$TRAIT_NAME" "$rep" "$start_cpu" "$end_cpu" &
+
+        current_jobs=$(( current_jobs + 1 ))
+        if [ "$current_jobs" -ge "$MAX_JOBS" ]; then
+            wait -n
+            current_jobs=$(( current_jobs - 1 ))
+        fi
+
+    done
+done
+
+wait
+echo "All fit1 replicates completed."
+
+
+
+This is Step 2: Run the bivariate analysis
+#!/bin/bash
+
+# ==========================================
+# run_mixer_serial_fit2_only.sh
+# Usage:
+# ./run_mixer_serial_fit2_only.sh <traitA_file> <traitB_file> <traitC_file> ...
+# Run only: A vs B, A vs C, ...
+# ==========================================
+
+if [ $# -lt 2 ]; then
+    echo "Usage: $0 <traitA_file> <traitB_file> ... <traitN_file>"
+    exit 1
+fi
+
+# -----------------------
+# Parameter settings
+# -----------------------
+TOTAL_REPS=20
+CORES_PER_TASK=6      # 12 cores per task
+TOTAL_CORES=60        # Total number of CPU cores
+MAX_JOBS=$(( TOTAL_CORES / CORES_PER_TASK ))  # Number of parallel jobs
+echo "Each task uses $CORES_PER_TASK CPU cores, with up to $MAX_JOBS tasks running simultaneously"
+
+MIXER_SIF=/mnt/d/gsamixer/singularity/v2.2.1/mixer.sif
+REFERENCE_DIR=/mnt/d/gsamixer/reference
+
+MIXER_COMMON_ARGS="--ld-file /REF/ldsc/1000G_EUR_Phase3_plink/1000G.EUR.QC.@.run4.ld \
+--bim-file /REF/ldsc/1000G_EUR_Phase3_plink/1000G.EUR.QC.@.bim --threads $CORES_PER_TASK"
+
+MIXER_PY="singularity exec \
+    --home $PWD:/home \
+    --bind $REFERENCE_DIR:/REF \
+    --bind $PWD:/data \
+    $MIXER_SIF python /tools/mixer/precimed/mixer.py"
+
+
+# -----------------------
+# Replicate fit2
+# -----------------------
+run_fit2() {
+    A_name=$1
+    B_name=$2
+    rep=$3
+    start_cpu=$4
+    end_cpu=$5
+    OUT_PREFIX=${A_name}_vs_${B_name}.fit.rep${rep}
+    OUT_JSON=${OUT_PREFIX}.json
+
+    # ---------- Key logic: skip if already completed ----------
+    if [ -f "$OUT_JSON" ]; then
+        echo "[SKIP] ${A_name} vs ${B_name} rep${rep} already exists"
+        return 0
+    fi
+    # --------------------------------------------------------
+    EXTRACT="--extract /REF/ldsc/1000G_EUR_Phase3_plink/1000G.EUR.QC.prune_maf0p05_rand2M_r2p8.rep${rep}.snps"
+
+    echo "Running FIT2: ${A_name} vs ${B_name} rep${rep} on CPUs ${start_cpu}-${end_cpu}"
+
+    taskset -c ${start_cpu}-${end_cpu} \
+        $MIXER_PY fit2 $MIXER_COMMON_ARGS $EXTRACT \
+        --trait1-file /data/${A_name}.csv.gz \
+        --trait2-file /data/${B_name}.csv.gz \
+        --trait1-params ${A_name}.fit.rep${rep}.json \
+        --trait2-params ${B_name}.fit.rep${rep}.json \
+        --out ${A_name}_vs_${B_name}.fit.rep${rep}
+}
+
+
+# -----------------------
+# Parse trait names
+# -----------------------
+declare -a TRAIT_NAMES
+for f in "$@"; do
+    TRAIT_NAMES+=("$(basename "$f" .csv.gz)")
+done
+
+A_NAME="${TRAIT_NAMES[0]}"
+echo "Primary trait A: $A_NAME"
+echo "Other traits: ${TRAIT_NAMES[@]:1}"
+echo ""
+
+
+# -----------------------
+# FIT2: parallel execution of A vs Others
+# -----------------------
+current_jobs=0
+cpu_pointer=0
+
+for TRAIT_NAME in "${TRAIT_NAMES[@]:1}"; do
+    for rep in $(seq 1 $TOTAL_REPS); do
+
+        start_cpu=$cpu_pointer
+        end_cpu=$(( cpu_pointer + CORES_PER_TASK - 1 ))
+        cpu_pointer=$(( (cpu_pointer + CORES_PER_TASK) % TOTAL_CORES ))
+
+        run_fit2 "$A_NAME" "$TRAIT_NAME" "$rep" "$start_cpu" "$end_cpu" &
+
+        current_jobs=$((current_jobs + 1))
+        if [ "$current_jobs" -ge "$MAX_JOBS" ]; then
+            wait -n
+            current_jobs=$((current_jobs - 1))
+        fi
+
+    done
+done
+
+wait  # Wait for all jobs to finish
+echo "All FIT2 A-vs-Others completed."
