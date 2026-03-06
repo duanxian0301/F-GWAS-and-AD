@@ -1,1 +1,107 @@
+Step 1:
+#!/bin/bash
 
+# Define paths
+DATA=/mnt/h/metaxcan/sample_data/data
+METAXCAN=/mnt/h/metaxcan/MetaXcan-master/software
+OUTPUT=/mnt/h/metaxcan/test
+MODEL_DIR=$DATA/models/eqtl/mashr/brain  # Folder containing mashr brain models
+
+# Create output directory
+mkdir -p $OUTPUT/spredixcan/eqtl
+
+# Loop through all GWAS input files (post-processed results)
+for gwas_file in $OUTPUT/processed_summary_imputation/imputed_*.txt.gz; do
+  # Extract GWAS name, e.g., EC / OC / CC
+  gwas_name=$(basename "$gwas_file" .txt.gz)
+  gwas_name=${gwas_name#imputed_}
+
+  echo "===== Processing GWAS: $gwas_name ====="
+
+  # Loop through all .db model files in the mashr model directory
+  for model_db in $MODEL_DIR/*.db; do
+    # Extract model name (tissue name)
+    model_name=$(basename "$model_db" .db)
+
+    # Set covariance file path
+    covariance_file="${MODEL_DIR}/${model_name}.txt.gz"
+
+    # Set output file path
+    output_file="$OUTPUT/spredixcan/eqtl/${gwas_name}__PM__${model_name}.csv"
+
+    # Run SPrediXcan analysis
+    python3 $METAXCAN/SPrediXcan.py \
+      --gwas_file "$gwas_file" \
+      --snp_column panel_variant_id \
+      --effect_allele_column effect_allele \
+      --non_effect_allele_column non_effect_allele \
+      --zscore_column zscore \
+      --model_db_path "$model_db" \
+      --covariance "$covariance_file" \
+      --keep_non_rsid \
+      --additional_output \
+      --model_db_snp_key varID \
+      --throw \
+      --output_file "$output_file"
+
+    # Check whether the run was successful
+    if [ $? -ne 0 ]; then
+      echo "Error during SPrediXcan for $gwas_name with model $model_name. Exiting..."
+      exit 1
+    fi
+
+    echo "Completed: $gwas_name × $model_name"
+  done
+
+  echo "===== All tissue models for GWAS $gwas_name have been completed ====="
+done
+
+echo "All SPrediXcan jobs for all GWAS × all tissues have been completed!"
+
+This is Step 2：
+#!/bin/bash
+
+# Define paths
+DATA=/mnt/h/metaxcan/sample_data/data
+METAXCAN=/mnt/h/metaxcan/MetaXcan-master/software
+OUTPUT=/mnt/h/metaxcan/test
+
+# Create output directory
+mkdir -p $OUTPUT/smultixcan/eqtl
+
+# Loop through all imputed GWAS files
+for gwas_file in $OUTPUT/processed_summary_imputation/imputed_*.txt.gz; do
+  # Extract GWAS name (e.g., imputed_EC -> EC)
+  gwas_name=$(basename "$gwas_file" .txt.gz)
+  gwas_name=${gwas_name#imputed_}
+
+  echo "===== Running SMulTiXcan: $gwas_name ====="
+
+  python3 $METAXCAN/SMulTiXcan.py \
+    --models_folder $DATA/models/eqtl/mashr/brain \
+    --models_name_pattern "mashr_(.*).db" \
+    --snp_covariance $DATA/models/gtex_v8_expression_mashr_snp_smultixcan_covariance.txt.gz \
+    --metaxcan_folder $OUTPUT/spredixcan/eqtl \
+    --metaxcan_filter "${gwas_name}__PM__mashr_(.*).csv" \
+    --metaxcan_file_name_parse_pattern "(.*)__PM__mashr_(.*).csv" \
+    --gwas_file "$gwas_file" \
+    --snp_column panel_variant_id \
+    --effect_allele_column effect_allele \
+    --non_effect_allele_column non_effect_allele \
+    --zscore_column zscore \
+    --keep_non_rsid \
+    --model_db_snp_key varID \
+    --cutoff_condition_number 30 \
+    --verbosity 7 \
+    --throw \
+    --output "$OUTPUT/smultixcan/eqtl/${gwas_name}_smultixcan.txt"
+
+  if [ $? -ne 0 ]; then
+    echo "❌ Error running SMulTiXcan for $gwas_name"
+    exit 1
+  fi
+
+  echo "✅ Completed SMulTiXcan: $gwas_name"
+done
+
+echo "🎉 SMulTiXcan analysis for all GWAS files has been completed!"
